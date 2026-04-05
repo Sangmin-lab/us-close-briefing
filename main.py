@@ -40,7 +40,7 @@ TASK = {
     "label": "미국증시 마감 브리핑",
     "time": os.getenv("US_CLOSE_BRIEF_TIME", "06:30"),
     "days": ["mon", "tue", "wed", "thu", "fri"],
-    "exclude_weekends": True,
+    "exclude_weekends": False,
     "max_retries": 3,
 }
 
