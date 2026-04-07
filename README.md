@@ -44,7 +44,7 @@
 
 - 뉴스 자동 수집
   - Alpha Vantage `NEWS_SENTIMENT`
-  - CNBC RSS
+  - CNBC RSS => 수집 안됨
   - Investing.com RSS
 
 - 보강 데이터 수집
@@ -79,3 +79,11 @@ telegram_ai_USstock/
    └─ workflows/
       └─ us-close-briefing.yml
 
+## Future Improvement
+- 미국 휴장일 자동 인식
+- 테스트 모드에서 요일 체크 우회
+- 종목별 커스텀 브리핑
+- 뉴스 품질 필터 강화
+- Telegram 메시지 포맷 개선
+- 섹터/산업 분류 확장
+- HTML 메시지 스타일 개선
