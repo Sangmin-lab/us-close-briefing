@@ -41,11 +41,19 @@
   - Materials
   - Semiconductors
   - Software
+  - Biotech / Banks / Regional Banks
+  - Cybersecurity / Cloud Computing / AI & Robotics
+  - Clean Energy / Homebuilders / Aerospace & Defense
+  - U.S. Infrastructure / Oil & Gas Exploration / Gold Miners
 
 - 뉴스 자동 수집
   - Alpha Vantage `NEWS_SENTIMENT`
   - CNBC RSS
+  - Reuters RSS
+  - MarketWatch RSS
+  - Yahoo Finance RSS
   - Investing.com RSS
+  - 뉴스 품질 필터(광고/영상성 콘텐츠, 짧은 제목, 중복 제목/링크 제거)
 
 - 보강 데이터 수집
   - Alpha Vantage `TOP_GAINERS_LOSERS`
@@ -60,11 +68,23 @@
   - 참고 링크
 
 - Telegram 자동 발송
+- 미국 휴장일 자동 인식(휴장일/주말 자동 skip)
+- 테스트 모드 요일 체크 우회(`TEST_MODE=true`)
+- 커스텀 종목 브리핑(`CUSTOM_WATCHLIST`)
+- HTML 메시지 스타일 개선(섹션 아이콘, 가독성 향상)
 - 재시도 및 fallback 메시지 지원
 - 로그 파일 자동 저장
 - GitHub Actions 기반 자동 실행 지원
 
 ---
+
+## Environment Variables
+
+- `TEST_MODE=true`
+  - 테스트 실행 시 요일/휴장일 체크를 우회합니다.
+- `CUSTOM_WATCHLIST=TSM,ASML:ASML,Palantir:PLTR`
+  - `티커` 또는 `표시명:티커` 형식으로 커스텀 종목을 지정합니다.
+  - 브리핑에 `<b>커스텀 종목 브리핑</b>` 섹션이 자동 추가됩니다.
 
 ## Project Structure
 
