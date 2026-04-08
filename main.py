@@ -3,7 +3,6 @@ import re
 import sys
 import time
 import html
-from datetime import datetime
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -316,7 +315,6 @@ def dedupe_news(items: list[dict]) -> list[dict]:
     out = []
     for item in items:
         key = item["link"].strip().lower()
-        if not key or key in seen:
         title_key = re.sub(r"[^a-z0-9]+", " ", item["title"].strip().lower())
         if not key or key in seen or title_key in seen_titles:
             continue
@@ -429,7 +427,6 @@ def format_news_block(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(index_rows: list[dict], mega_rows: list[dict], sector_rows: list[dict], news_items: list[dict], top_movers: dict) -> str:
 def build_prompt(
     index_rows: list[dict],
     mega_rows: list[dict],
@@ -528,8 +525,6 @@ def build_prompt(
 """.strip()
 
 
-def generate_analysis(index_rows: list[dict], mega_rows: list[dict], sector_rows: list[dict], news_items: list[dict], top_movers: dict) -> str:
-    prompt = build_prompt(index_rows, mega_rows, sector_rows, news_items, top_movers)
 def generate_analysis(
     index_rows: list[dict],
     mega_rows: list[dict],
@@ -547,7 +542,6 @@ def generate_analysis(
     return text
 
 
-def build_fallback_message(index_rows: list[dict], mega_rows: list[dict], sector_rows: list[dict], news_items: list[dict]) -> str:
 def build_fallback_message(
     index_rows: list[dict],
     mega_rows: list[dict],
@@ -643,7 +637,6 @@ def style_message_html(message: str) -> str:
 def send_to_telegram(message: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    for chunk in split_message(message):
     styled_message = style_message_html(message)
 
     for chunk in split_message(styled_message):
@@ -674,7 +667,6 @@ def save_error_log(task_name: str, error_message: str) -> Path:
     return error_log
 
 
-def collect_all_data() -> tuple[list[dict], list[dict], list[dict], list[dict], dict]:
 def collect_all_data() -> tuple[list[dict], list[dict], list[dict], list[dict], dict, list[dict]]:
     index_rows = collect_symbol_group(INDEX_SYMBOLS)
     mega_rows = collect_symbol_group(MEGA_CAP_SYMBOLS)
@@ -690,7 +682,6 @@ def collect_all_data() -> tuple[list[dict], list[dict], list[dict], list[dict], 
     if not sector_rows:
         raise RuntimeError("섹터 데이터 수집 실패")
 
-    return index_rows, mega_rows, sector_rows, news_items, top_movers
     return index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows
 
 
@@ -699,7 +690,6 @@ def execute_task(task: dict) -> None:
     print(f"[{now_str}] task 시작: {task['name']}")
 
     if not is_task_day(task):
-        print(f"오늘은 task[{task['name']}] 발송 대상 요일이 아닙니다. 건너뜁니다.")
         if is_us_market_holiday(datetime.now().date()):
             print(f"오늘은 미국 증시 휴장일입니다. task[{task['name']}]를 건너뜁니다.")
         else:
@@ -713,11 +703,9 @@ def execute_task(task: dict) -> None:
         attempt += 1
         try:
             print("시장 데이터 및 뉴스 수집 시작")
-            index_rows, mega_rows, sector_rows, news_items, top_movers = collect_all_data()
             index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows = collect_all_data()
             print("데이터 수집 완료")
 
-            analysis = generate_analysis(index_rows, mega_rows, sector_rows, news_items, top_movers)
             analysis = generate_analysis(index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows)
             print("=== GENERATED ANALYSIS ===")
             print(analysis)
@@ -740,8 +728,6 @@ def execute_task(task: dict) -> None:
 
             if attempt == retries:
                 try:
-                    index_rows, mega_rows, sector_rows, news_items, _ = collect_all_data()
-                    fallback_message = build_fallback_message(index_rows, mega_rows, sector_rows, news_items)
                     index_rows, mega_rows, sector_rows, news_items, _, custom_rows = collect_all_data()
                     fallback_message = build_fallback_message(index_rows, mega_rows, sector_rows, news_items, custom_rows)
                     send_to_telegram(fallback_message)
