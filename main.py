@@ -1,8 +1,10 @@
 import os
+import re
 import sys
 import time
 import html
 from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from urllib.parse import quote
 import xml.etree.ElementTree as ET
@@ -24,6 +26,8 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_DELAY_SECONDS = int(os.getenv("RETRY_DELAY_SECONDS", "20"))
 NEWS_LIMIT = int(os.getenv("NEWS_LIMIT", "8"))
 REFERENCE_LINK_LIMIT = int(os.getenv("REFERENCE_LINK_LIMIT", "3"))
+TEST_MODE = os.getenv("TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+CUSTOM_WATCHLIST = os.getenv("CUSTOM_WATCHLIST", "").strip()
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
@@ -49,11 +53,7 @@ INDEX_SYMBOLS = {
     "Nasdaq": "^IXIC",
     "Dow": "^DJI",
     "Russell 2000": "^RUT",
-    "VIX": "^VIX",
-}
-
-MEGA_CAP_SYMBOLS = {
-    "NVIDIA": "NVDA",
+@@ -57,100 +60,215 @@ MEGA_CAP_SYMBOLS = {
     "Microsoft": "MSFT",
     "Apple": "AAPL",
     "Amazon": "AMZN",
@@ -79,6 +79,18 @@ SECTOR_SYMBOLS = {
     "Materials": "XLB",
     "Semiconductors": "SOXX",
     "Software": "IGV",
+    "Biotech": "XBI",
+    "Banks": "KBE",
+    "Regional Banks": "KRE",
+    "Cybersecurity": "HACK",
+    "Cloud Computing": "SKYY",
+    "AI & Robotics": "BOTZ",
+    "Clean Energy": "ICLN",
+    "Homebuilders": "XHB",
+    "Aerospace & Defense": "ITA",
+    "U.S. Infrastructure": "PAVE",
+    "Oil & Gas Exploration": "XOP",
+    "Gold Miners": "GDX",
 }
 
 CNBC_RSS_URLS = [
@@ -91,6 +103,26 @@ INVESTING_RSS_URLS = [
     "https://www.investing.com/rss/news_285.rss",
     "https://www.investing.com/rss/news_25.rss",
     "https://www.investing.com/rss/market_overview.rss",
+]
+
+ALT_NEWS_RSS_SOURCES = {
+    "Reuters Markets": [
+        "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+    ],
+    "MarketWatch Top Stories": [
+        "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    ],
+    "Yahoo Finance": [
+        "https://finance.yahoo.com/news/rssindex",
+    ],
+}
+
+NEWS_BLOCKLIST_PATTERNS = [
+    r"\bvideo\b",
+    r"\bpodcast\b",
+    r"\badvertis",
+    r"\bsponsored\b",
+    r"\bnewsletter\b",
 ]
 
 
@@ -120,13 +152,96 @@ def validate_task() -> None:
         raise ValueError(f"TASK time 형식 오류: {TASK['time']} (예: 06:30)")
 
 
+def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    shift = (weekday - first.weekday()) % 7
+    return first + timedelta(days=shift + (n - 1) * 7)
+
+
+def last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        next_month = date(year + 1, 1, 1)
+    else:
+        next_month = date(year, month + 1, 1)
+    last = next_month - timedelta(days=1)
+    shift = (last.weekday() - weekday) % 7
+    return last - timedelta(days=shift)
+
+
+def observed_fixed_holiday(year: int, month: int, day: int) -> date:
+    d = date(year, month, day)
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+def get_easter_date(year: int) -> date:
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def get_us_market_holidays(year: int) -> set[date]:
+    holidays = set()
+    holidays.add(observed_fixed_holiday(year, 1, 1))  # New Year's Day
+    holidays.add(nth_weekday_of_month(year, 1, 0, 3))  # MLK Day
+    holidays.add(nth_weekday_of_month(year, 2, 0, 3))  # Washington's Birthday
+    holidays.add(get_easter_date(year) - timedelta(days=2))  # Good Friday
+    holidays.add(last_weekday_of_month(year, 5, 0))  # Memorial Day
+    holidays.add(observed_fixed_holiday(year, 6, 19))  # Juneteenth
+    holidays.add(observed_fixed_holiday(year, 7, 4))  # Independence Day
+    holidays.add(nth_weekday_of_month(year, 9, 0, 1))  # Labor Day
+    holidays.add(nth_weekday_of_month(year, 11, 3, 4))  # Thanksgiving
+    holidays.add(observed_fixed_holiday(year, 12, 25))  # Christmas
+    return holidays
+
+
+def is_us_market_holiday(target_date: date) -> bool:
+    return target_date in get_us_market_holidays(target_date.year)
+
+
 def is_task_day(task: dict, dt: datetime | None = None) -> bool:
     dt = dt or datetime.now()
+    if TEST_MODE:
+        return True
+
     weekday = dt.weekday()
     if task.get("exclude_weekends", False) and weekday >= 5:
         return False
+    if is_us_market_holiday(dt.date()):
+        return False
     allowed_days = [DAY_NAME_MAP[d] for d in task["days"]]
     return weekday in allowed_days
+
+
+def parse_custom_watchlist() -> dict[str, str]:
+    if not CUSTOM_WATCHLIST:
+        return {}
+
+    output = {}
+    tokens = [x.strip() for x in CUSTOM_WATCHLIST.split(",") if x.strip()]
+    for token in tokens:
+        if ":" in token:
+            name, symbol = token.split(":", 1)
+            output[normalize_text(name)] = normalize_text(symbol).upper()
+        else:
+            normalized = normalize_text(token).upper()
+            output[normalized] = normalized
+    return output
 
 
 def normalize_text(text: str) -> str:
@@ -154,105 +269,7 @@ def get_yahoo_chart_snapshot(symbol: str) -> dict:
         "interval": "1d",
         "range": "5d",
         "includePrePost": "false",
-        "events": "div,splits",
-    }
-    data = fetch_json(url, params=params)
-
-    result = data.get("chart", {}).get("result", [])
-    if not result:
-        raise RuntimeError(f"Yahoo chart result 없음: {symbol}")
-
-    item = result[0]
-    meta = item.get("meta", {})
-    indicators = item.get("indicators", {}).get("quote", [{}])[0]
-    closes = indicators.get("close", []) or []
-
-    valid_closes = [c for c in closes if c is not None]
-    last_close = valid_closes[-1] if len(valid_closes) >= 1 else None
-    prev_close = valid_closes[-2] if len(valid_closes) >= 2 else None
-
-    if last_close is None:
-        last_close = meta.get("regularMarketPrice") or meta.get("previousClose")
-    if prev_close is None:
-        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
-
-    if last_close is None or prev_close in (None, 0):
-        raise RuntimeError(f"가격 계산 실패: {symbol}")
-
-    change = float(last_close) - float(prev_close)
-    pct = (change / float(prev_close)) * 100
-
-    return {
-        "symbol": symbol,
-        "price": round(float(last_close), 4),
-        "prev_close": round(float(prev_close), 4),
-        "change": round(change, 4),
-        "pct": round(pct, 2),
-        "currency": meta.get("currency", ""),
-        "exchange": meta.get("exchangeName", ""),
-    }
-
-
-def collect_symbol_group(symbol_map: dict[str, str]) -> list[dict]:
-    rows = []
-    for name, symbol in symbol_map.items():
-        try:
-            snap = get_yahoo_chart_snapshot(symbol)
-            snap["name"] = name
-            rows.append(snap)
-        except Exception as e:
-            print(f"[WARN] 시세 수집 실패: {name} ({symbol}) / {e}")
-    return rows
-
-
-def collect_alpha_vantage_news() -> list[dict]:
-    if not ALPHAVANTAGE_API_KEY:
-        return []
-
-    try:
-        url = "https://www.alphavantage.co/query"
-        params = {
-            "function": "NEWS_SENTIMENT",
-            "tickers": "NVDA,MSFT,AAPL,AMZN,GOOGL,META,TSLA,AVGO,JPM",
-            "topics": "technology,earnings,finance",
-            "limit": NEWS_LIMIT,
-            "sort": "LATEST",
-            "apikey": ALPHAVANTAGE_API_KEY,
-        }
-        data = fetch_json(url, params=params, timeout=40)
-        feed = data.get("feed", []) or []
-
-        items = []
-        for x in feed[:NEWS_LIMIT]:
-            title = normalize_text(x.get("title", ""))
-            link = normalize_text(x.get("url", ""))
-            summary = normalize_text(x.get("summary", ""))
-            source = normalize_text(x.get("source", "Alpha Vantage"))
-            if not title or not link:
-                continue
-            items.append({
-                "title": title,
-                "link": link,
-                "summary": summary[:280],
-                "source": source,
-            })
-        return items
-    except Exception as e:
-        print(f"[WARN] Alpha Vantage NEWS_SENTIMENT 수집 실패 / {e}")
-        return []
-
-
-def collect_top_movers() -> dict:
-    if not ALPHAVANTAGE_API_KEY:
-        return {}
-
-    try:
-        url = "https://www.alphavantage.co/query"
-        params = {
-            "function": "TOP_GAINERS_LOSERS",
-            "apikey": ALPHAVANTAGE_API_KEY,
-        }
-        return fetch_json(url, params=params, timeout=30)
+@@ -256,95 +374,132 @@ def collect_top_movers() -> dict:
     except Exception as e:
         print(f"[WARN] Alpha Vantage TOP_GAINERS_LOSERS 수집 실패 / {e}")
         return {}
@@ -278,14 +295,35 @@ def parse_rss_items(xml_text: str, source_name: str) -> list[dict]:
     return items
 
 
+def is_high_quality_news(item: dict) -> bool:
+    title = normalize_text(item.get("title", ""))
+    summary = normalize_text(item.get("summary", ""))
+    link = normalize_text(item.get("link", ""))
+    lowered = f"{title} {summary}".lower()
+
+    if len(title) < 25:
+        return False
+    if len(link) < 10 or not link.startswith("http"):
+        return False
+    if any(re.search(pattern, lowered) for pattern in NEWS_BLOCKLIST_PATTERNS):
+        return False
+    return True
+
+
 def dedupe_news(items: list[dict]) -> list[dict]:
     seen = set()
+    seen_titles = set()
     out = []
     for item in items:
         key = item["link"].strip().lower()
         if not key or key in seen:
+        title_key = re.sub(r"[^a-z0-9]+", " ", item["title"].strip().lower())
+        if not key or key in seen or title_key in seen_titles:
+            continue
+        if not is_high_quality_news(item):
             continue
         seen.add(key)
+        seen_titles.add(title_key)
         out.append(item)
     return out
 
@@ -314,6 +352,19 @@ def collect_investing_rss_news() -> list[dict]:
     return dedupe_news(collected)[:NEWS_LIMIT]
 
 
+def collect_alt_rss_news() -> list[dict]:
+    collected = []
+    for source_name, urls in ALT_NEWS_RSS_SOURCES.items():
+        for url in urls:
+            try:
+                xml_text = fetch_text(url, timeout=30)
+                collected.extend(parse_rss_items(xml_text, source_name))
+            except Exception as e:
+                print(f"[WARN] 대체 RSS 수집 실패: {source_name} / {url} / {e}")
+
+    return dedupe_news(collected)[:NEWS_LIMIT]
+
+
 def collect_news() -> list[dict]:
     av_news = collect_alpha_vantage_news()
     if av_news:
@@ -322,6 +373,10 @@ def collect_news() -> list[dict]:
     cnbc_news = collect_cnbc_rss_news()
     if cnbc_news:
         return cnbc_news[:NEWS_LIMIT]
+
+    alt_news = collect_alt_rss_news()
+    if alt_news:
+        return alt_news[:NEWS_LIMIT]
 
     investing_news = collect_investing_rss_news()
     return investing_news[:NEWS_LIMIT]
@@ -348,27 +403,7 @@ def format_sorted_sector_block(rows: list[dict], reverse: bool) -> str:
 def format_top_movers_block(data: dict) -> str:
     if not data:
         return ""
-
-    lines = []
-
-    gainers = data.get("top_gainers", [])[:5]
-    losers = data.get("top_losers", [])[:5]
-    active = data.get("most_actively_traded", [])[:5]
-
-    if gainers:
-        lines.append("[TOP GAINERS]")
-        for x in gainers:
-            ticker = normalize_text(x.get("ticker", ""))
-            change_pct = normalize_text(x.get("change_percentage", ""))
-            if ticker:
-                lines.append(f"- {ticker}: {change_pct}")
-
-    if losers:
-        lines.append("[TOP LOSERS]")
-        for x in losers:
-            ticker = normalize_text(x.get("ticker", ""))
-            change_pct = normalize_text(x.get("change_percentage", ""))
-            if ticker:
+@@ -372,293 +527,353 @@ def format_top_movers_block(data: dict) -> str:
                 lines.append(f"- {ticker}: {change_pct}")
 
     if active:
@@ -395,6 +430,14 @@ def format_news_block(items: list[dict]) -> str:
 
 
 def build_prompt(index_rows: list[dict], mega_rows: list[dict], sector_rows: list[dict], news_items: list[dict], top_movers: dict) -> str:
+def build_prompt(
+    index_rows: list[dict],
+    mega_rows: list[dict],
+    sector_rows: list[dict],
+    news_items: list[dict],
+    top_movers: dict,
+    custom_rows: list[dict],
+) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
 
     return f"""
@@ -414,6 +457,9 @@ def build_prompt(index_rows: list[dict], mega_rows: list[dict], sector_rows: lis
 
 [자동 수집 시총 상위 종목 데이터]
 {format_market_block(mega_rows)}
+
+[자동 수집 사용자 커스텀 종목 데이터]
+{format_market_block(custom_rows) if custom_rows else "- 없음"}
 
 [자동 수집 섹터/산업 데이터 - 강한 순 참고]
 {format_sorted_sector_block(sector_rows, reverse=True)}
@@ -448,6 +494,11 @@ def build_prompt(index_rows: list[dict], mega_rows: list[dict], sector_rows: lis
 - 형식: 종목명: 강세/약세 + 이유
 - 한 줄씩 짧게
 
+<b>커스텀 종목 브리핑</b>
+- custom 종목이 있다면 2~5개를 별도 bullet로 요약
+- 형식: 종목명: 당일 흐름 + 체크포인트
+- custom 종목이 없으면 이 섹션은 생략
+
 <b>강한 곳 / 약한 곳</b>
 - 강한 섹터·산업: 2~3개
 - 약한 섹터·산업: 2~3개
@@ -479,6 +530,15 @@ def build_prompt(index_rows: list[dict], mega_rows: list[dict], sector_rows: lis
 
 def generate_analysis(index_rows: list[dict], mega_rows: list[dict], sector_rows: list[dict], news_items: list[dict], top_movers: dict) -> str:
     prompt = build_prompt(index_rows, mega_rows, sector_rows, news_items, top_movers)
+def generate_analysis(
+    index_rows: list[dict],
+    mega_rows: list[dict],
+    sector_rows: list[dict],
+    news_items: list[dict],
+    top_movers: dict,
+    custom_rows: list[dict],
+) -> str:
+    prompt = build_prompt(index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows)
     response = client.responses.create(model=OPENAI_MODEL, input=prompt)
     text = getattr(response, "output_text", "") or ""
     text = text.strip()
@@ -488,6 +548,13 @@ def generate_analysis(index_rows: list[dict], mega_rows: list[dict], sector_rows
 
 
 def build_fallback_message(index_rows: list[dict], mega_rows: list[dict], sector_rows: list[dict], news_items: list[dict]) -> str:
+def build_fallback_message(
+    index_rows: list[dict],
+    mega_rows: list[dict],
+    sector_rows: list[dict],
+    news_items: list[dict],
+    custom_rows: list[dict],
+) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
 
     strong = sorted(sector_rows, key=lambda x: x["pct"], reverse=True)[:3]
@@ -503,6 +570,13 @@ def build_fallback_message(index_rows: list[dict], mega_rows: list[dict], sector
         sign = "+" if row["pct"] >= 0 else ""
         lines.append(f"- {row['name']}: {sign}{row['pct']:.2f}%")
     lines.append("")
+
+    if custom_rows:
+        lines.append("<b>커스텀 종목 브리핑</b>")
+        for row in custom_rows[:5]:
+            sign = "+" if row["pct"] >= 0 else ""
+            lines.append(f"- {row['name']}: {sign}{row['pct']:.2f}%")
+        lines.append("")
 
     lines.append("<b>핵심 종목</b>")
     for name in key_names:
@@ -547,10 +621,32 @@ def split_message(text: str, limit: int = 3500) -> list[str]:
     return chunks
 
 
+def style_message_html(message: str) -> str:
+    section_map = {
+        "<b>한 줄 총평</b>": "<b>🧭 한 줄 총평</b>",
+        "<b>지수</b>": "<b>📈 지수</b>",
+        "<b>자금 흐름</b>": "<b>💸 자금 흐름</b>",
+        "<b>핵심 종목</b>": "<b>🏷️ 핵심 종목</b>",
+        "<b>커스텀 종목 브리핑</b>": "<b>🎯 커스텀 종목 브리핑</b>",
+        "<b>강한 곳 / 약한 곳</b>": "<b>🧩 강한 곳 / 약한 곳</b>",
+        "<b>체크포인트</b>": "<b>✅ 체크포인트</b>",
+        "<b>참고 링크</b>": "<b>🔗 참고 링크</b>",
+    }
+    styled = message
+    for plain, iconed in section_map.items():
+        styled = styled.replace(plain, iconed)
+
+    styled = styled.replace("- ", "• ")
+    return styled
+
+
 def send_to_telegram(message: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     for chunk in split_message(message):
+    styled_message = style_message_html(message)
+
+    for chunk in split_message(styled_message):
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": chunk,
@@ -579,9 +675,11 @@ def save_error_log(task_name: str, error_message: str) -> Path:
 
 
 def collect_all_data() -> tuple[list[dict], list[dict], list[dict], list[dict], dict]:
+def collect_all_data() -> tuple[list[dict], list[dict], list[dict], list[dict], dict, list[dict]]:
     index_rows = collect_symbol_group(INDEX_SYMBOLS)
     mega_rows = collect_symbol_group(MEGA_CAP_SYMBOLS)
     sector_rows = collect_symbol_group(SECTOR_SYMBOLS)
+    custom_rows = collect_symbol_group(parse_custom_watchlist())
     news_items = collect_news()
     top_movers = collect_top_movers()
 
@@ -593,6 +691,7 @@ def collect_all_data() -> tuple[list[dict], list[dict], list[dict], list[dict], 
         raise RuntimeError("섹터 데이터 수집 실패")
 
     return index_rows, mega_rows, sector_rows, news_items, top_movers
+    return index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows
 
 
 def execute_task(task: dict) -> None:
@@ -601,6 +700,10 @@ def execute_task(task: dict) -> None:
 
     if not is_task_day(task):
         print(f"오늘은 task[{task['name']}] 발송 대상 요일이 아닙니다. 건너뜁니다.")
+        if is_us_market_holiday(datetime.now().date()):
+            print(f"오늘은 미국 증시 휴장일입니다. task[{task['name']}]를 건너뜁니다.")
+        else:
+            print(f"오늘은 task[{task['name']}] 발송 대상 요일이 아닙니다. 건너뜁니다.")
         return
 
     retries = task.get("max_retries", MAX_RETRIES)
@@ -611,9 +714,11 @@ def execute_task(task: dict) -> None:
         try:
             print("시장 데이터 및 뉴스 수집 시작")
             index_rows, mega_rows, sector_rows, news_items, top_movers = collect_all_data()
+            index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows = collect_all_data()
             print("데이터 수집 완료")
 
             analysis = generate_analysis(index_rows, mega_rows, sector_rows, news_items, top_movers)
+            analysis = generate_analysis(index_rows, mega_rows, sector_rows, news_items, top_movers, custom_rows)
             print("=== GENERATED ANALYSIS ===")
             print(analysis)
 
@@ -637,6 +742,8 @@ def execute_task(task: dict) -> None:
                 try:
                     index_rows, mega_rows, sector_rows, news_items, _ = collect_all_data()
                     fallback_message = build_fallback_message(index_rows, mega_rows, sector_rows, news_items)
+                    index_rows, mega_rows, sector_rows, news_items, _, custom_rows = collect_all_data()
+                    fallback_message = build_fallback_message(index_rows, mega_rows, sector_rows, news_items, custom_rows)
                     send_to_telegram(fallback_message)
                     print(f"fallback 전송 완료: {task['name']}")
                     return
@@ -662,55 +769,3 @@ def run_now_mode() -> None:
 
 def register_schedule_jobs() -> None:
     schedule.clear()
-
-    def job_runner():
-        execute_task(TASK)
-
-    schedule.every().day.at(TASK["time"]).do(job_runner)
-    print(
-        f"등록 완료 -> task={TASK['name']}, "
-        f"time={TASK['time']}, days={TASK['days']}, "
-        f"exclude_weekends={TASK['exclude_weekends']}"
-    )
-
-
-def run_schedule_mode() -> None:
-    print("실행 모드: 스케줄 실행")
-    print(f"현재 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("프로그램 실행 중... 종료하려면 Ctrl + C")
-
-    register_schedule_jobs()
-
-    while True:
-        schedule.run_pending()
-        time.sleep(10)
-
-
-def print_usage() -> None:
-    print("사용법:")
-    print("  python main.py now")
-    print("  python main.py schedule")
-    print("  python main.py")
-
-
-def main() -> None:
-    validate_env()
-    validate_task()
-
-    if len(sys.argv) == 1:
-        mode = "schedule"
-    else:
-        mode = sys.argv[1].strip().lower()
-
-    if mode == "now":
-        run_now_mode()
-    elif mode == "schedule":
-        run_schedule_mode()
-    else:
-        print(f"알 수 없는 모드: {mode}")
-        print_usage()
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
